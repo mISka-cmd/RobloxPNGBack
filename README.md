@@ -1,4 +1,4 @@
-# dnsonlien — фикс картинок в Roblox (Россия)
+# dnsonlien — фикс картинок в Roblox
 
 > **English:** This tool fixes broken Roblox images (avatars, thumbnails, marketplace) in Russia.
 > The ISP spoils plain DNS answers for `*.rbxcdn.com`, so a tiny local service on `127.0.0.1:53`
