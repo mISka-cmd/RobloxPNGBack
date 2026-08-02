@@ -1,0 +1,14 @@
+# Build output (rebuilt automatically by install.bat)
+bin/
+
+# Runtime logs & local state
+logs/
+
+# Machine-specific DNS backup (created on install)
+backup/
+
+# OS / editor junk
+Thumbs.db
+.DS_Store
+desktop.ini
+*.old.exe
