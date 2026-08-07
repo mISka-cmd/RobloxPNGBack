@@ -189,7 +189,16 @@ try {
     Backup-Dns
     Install-Service
 
-    if (-not (Wait-ProxyReady)) { Log 'WARN: proxy port 53 not responding after start' }
+    if (-not (Wait-ProxyReady)) {
+        Log 'WARN: proxy port 53 not responding after start'
+        $portOwners = Get-NetTCPConnection -LocalPort 53 -State Listen -ErrorAction SilentlyContinue
+        if ($portOwners) {
+            foreach ($l in $portOwners) {
+                $proc = Get-Process -Id $l.OwningProcess -ErrorAction SilentlyContinue
+                Log "WARN: port 53 is held by PID $($l.OwningProcess) ($($proc.ProcessName)) - disable that program first"
+            }
+        }
+    }
 
     Set-LocalDns $backup
     Mark "after Set-LocalDns"

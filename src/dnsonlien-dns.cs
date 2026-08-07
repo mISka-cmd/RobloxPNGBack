@@ -84,6 +84,11 @@ namespace DnsonlienDns
         };
 
         static readonly DohClient Doh = new DohClient(DOH_HOSTS, BOOTSTRAP_DNS, FALLBACK_IPS);
+        static readonly Dictionary<string, string[]> OVERRIDE_A = new Dictionary<string, string[]>
+        {
+            { "tr.rbxcdn.com", new[] { "13.249.8.61", "13.249.8.58", "13.249.8.90", "23.215.2.9", "23.215.2.27" } },
+            { "trns1.rbxcdn.com", new[] { "13.249.8.61", "13.249.8.58", "13.249.8.90", "23.215.2.9", "23.215.2.27" } }
+        };
         static readonly ConcurrentDictionary<string, CacheEntry> Cache = new ConcurrentDictionary<string, CacheEntry>();
         static readonly object UdpLock = new object();
         static readonly List<object> Listeners = new List<object>();
@@ -219,6 +224,20 @@ namespace DnsonlienDns
             }
 
             byte[] resp = Doh.Query(query);
+            if (!DnsParse.HasARecord(resp) && DnsParse.IsA(query))
+            {
+                string qn = DnsParse.GetQuestionName(query);
+                string[] oi;
+                if (qn != null && OVERRIDE_A.TryGetValue(qn.ToLowerInvariant(), out oi) && oi.Length > 0)
+                {
+                    byte[] synth = DnsParse.BuildAOverride(query, oi);
+                    if (synth != null)
+                    {
+                        resp = synth;
+                        Program.Log("Override A for " + qn);
+                    }
+                }
+            }
             if (resp == null || resp.Length < 12) return null;
 
             int ttl = DnsParse.GetMinTtl(resp);
@@ -588,6 +607,122 @@ namespace DnsonlienDns
                 p += 1 + len;
             }
             return p;
+        }
+
+        public static bool IsA(byte[] q)
+        {
+            if (q == null || q.Length < 12) return false;
+            int p = 12;
+            while (p < q.Length)
+            {
+                byte b = q[p];
+                if (b == 0) { p++; break; }
+                if ((b & 0xC0) != 0) return false;
+                if (p + 1 + b >= q.Length) return false;
+                p += 1 + b;
+            }
+            if (p + 4 > q.Length) return false;
+            int type = (q[p] << 8) | q[p + 1];
+            return type == 1;
+        }
+
+        public static string GetQuestionName(byte[] q)
+        {
+            if (q == null || q.Length < 12) return null;
+            int p = 12;
+            var sb = new StringBuilder();
+            bool first = true;
+            while (p < q.Length)
+            {
+                byte len = q[p];
+                if (len == 0) { p++; break; }
+                if ((len & 0xC0) != 0) break;
+                if (p + 1 + len > q.Length) return null;
+                if (!first) sb.Append('.');
+                first = false;
+                sb.Append(Encoding.ASCII.GetString(q, p + 1, len));
+                p += 1 + len;
+            }
+            return first ? null : sb.ToString();
+        }
+
+        public static bool HasARecord(byte[] resp)
+        {
+            if (resp == null || resp.Length < 12) return false;
+            int qd = (resp[4] << 8) | resp[5];
+            int an = (resp[6] << 8) | resp[7];
+            if (an == 0) return false;
+            int pos = 12;
+            for (int i = 0; i < qd; i++) { pos = SkipName(resp, pos); pos += 4; }
+            for (int i = 0; i < an; i++)
+            {
+                pos = SkipName(resp, pos);
+                if (pos + 10 > resp.Length) return false;
+                int type = (resp[pos] << 8) | resp[pos + 1];
+                int rdlen = (resp[pos + 8] << 8) | resp[pos + 9];
+                pos += 10;
+                if (type == 1 && rdlen == 4 && pos + 4 <= resp.Length) return true;
+                pos += rdlen;
+            }
+            return false;
+        }
+
+        public static byte[] BuildAOverride(byte[] q, string[] ips)
+        {
+            try
+            {
+                string qn = GetQuestionName(q);
+                if (qn == null) return null;
+                int p = 12;
+                while (p < q.Length) { byte len = q[p]; if (len == 0) break; p += 1 + len; }
+                if (p + 1 + 4 > q.Length) return null;
+                int qtypePos = p + 1;
+
+                var valid = new List<byte[]>();
+                foreach (string ip in ips)
+                {
+                    string[] parts = ip.Split('.');
+                    if (parts.Length != 4) continue;
+                    byte[] bin = new byte[4];
+                    bool ok = true;
+                    for (int i = 0; i < 4; i++)
+                    {
+                        byte x;
+                        if (!byte.TryParse(parts[i], out x)) { ok = false; break; }
+                        bin[i] = x;
+                    }
+                    if (ok) valid.Add(bin);
+                }
+                if (valid.Count == 0) return null;
+
+                int arcCount = (q[10] << 8) | q[11];
+                int addStart = qtypePos + 4;
+
+                var ms = new MemoryStream();
+                ms.WriteByte(q[0]); ms.WriteByte(q[1]);
+                ms.WriteByte(0x81); ms.WriteByte(0x80);
+                ms.WriteByte(0); ms.WriteByte(1);
+                ms.WriteByte(0); ms.WriteByte((byte)valid.Count);
+                ms.WriteByte(0); ms.WriteByte(0);
+                ms.WriteByte((byte)((arcCount >> 8) & 0xFF)); ms.WriteByte((byte)(arcCount & 0xFF));
+                ms.Write(q, 12, qtypePos - 12);
+                ms.WriteByte(q[qtypePos]); ms.WriteByte(q[qtypePos + 1]);
+                ms.WriteByte(q[qtypePos + 2]); ms.WriteByte(q[qtypePos + 3]);
+                byte[] owner = { 0xC0, 0x0C };
+                byte[] ttl = { 0, 0, 0, 60 };
+                foreach (byte[] bin in valid)
+                {
+                    ms.Write(owner, 0, 2);
+                    ms.WriteByte(0); ms.WriteByte(1);
+                    ms.WriteByte(0); ms.WriteByte(1);
+                    ms.Write(ttl, 0, 4);
+                    ms.WriteByte(0); ms.WriteByte(4);
+                    ms.Write(bin, 0, 4);
+                }
+                if (arcCount > 0 && addStart + 11 <= q.Length) ms.Write(q, addStart, q.Length - addStart);
+                return ms.ToArray();
+            }
+            catch { return null; }
         }
     }
 }
